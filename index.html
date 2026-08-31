@@ -135,6 +135,15 @@
     display:flex; align-items:center; justify-content:space-between; font-weight:800;}
   .deposit .amt{font-size:30px;}
   .history .hrow{display:flex; justify-content:space-between; padding:9px 0; border-top:1px solid var(--line); font-weight:700; font-size:14px;}
+  .paybtn{margin-top:12px; width:100%;}
+  .hitem{padding:12px 0; border-top:2px solid var(--line);}
+  .hitem:first-of-type{border-top:none;}
+  .hweek{font-weight:800; font-size:15px; display:flex; justify-content:space-between; align-items:baseline; margin-bottom:2px;}
+  .hdep{font-weight:700; font-size:13px; color:var(--gold-ink);}
+  .paidtag{background:var(--k2-soft); color:#0C7A6E; font-size:11px; font-weight:800; padding:2px 7px; border-radius:8px; text-transform:uppercase; letter-spacing:.4px;}
+  .hright{white-space:nowrap;}
+  .histpay{font-weight:800; font-size:12px; padding:4px 10px; border-radius:9px; background:var(--line); color:var(--muted); margin-left:6px;}
+  .histpay.on{background:var(--k2-soft); color:#0C7A6E;}
   .toast{position:fixed; left:50%; bottom:26px; transform:translateX(-50%) translateY(20px); background:var(--ink); color:#fff;
     padding:13px 20px; border-radius:14px; font-weight:800; box-shadow:var(--shadow-lg); opacity:0; transition:.25s; z-index:50;}
   .toast.show{opacity:1; transform:translateX(-50%) translateY(0);}
@@ -165,9 +174,10 @@ var DOW=["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
 var DOWFULL=["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
 function iso(d){ return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0"); }
 function today(){ return new Date(); }
-function weekStartOf(d){ var x=new Date(d); x.setHours(0,0,0,0); x.setDate(x.getDate()-x.getDay()); return x; } // Sunday
+function weekStartOf(d){ var x=new Date(d); x.setHours(0,0,0,0); var off=(x.getDay()+6)%7; x.setDate(x.getDate()-off); return x; } // Monday
 function weekDates(){ var s=weekStartOf(today()); var a=[]; for(var i=0;i<7;i++){ var d=new Date(s); d.setDate(s.getDate()+i); a.push({iso:iso(d),dow:d.getDay()}); } return a; }
 function money(n){ return "$"+(Math.round(n*100)/100).toFixed(2); }
+function monthYear(s){ var M=["January","February","March","April","May","June","July","August","September","October","November","December"]; var d=new Date(s+"T12:00:00"); return M[d.getMonth()]+" "+d.getFullYear(); }
 function uid(){ return Math.random().toString(36).slice(2,9); }
 
 /* ---------------- defaults ---------------- */
@@ -214,8 +224,11 @@ function defaults(){
       {id:uid(),name:"Return Jarvis to his home base",emoji:"🤖",value:0.25}
     ],
     weekStart:iso(weekStartOf(today())),
+    since:"2026-09-01", // when lifetime tracking began
     done:{},      // done[kidId][choreId][isoDate] = true
     counts:{},    // counts[kidId][bonusId] = number
+    paid:{},      // paid[kidId] = true once handed out this week
+    lifetime:{},  // lifetime[kidId] = {earned,invest,keep}
     history:[]    // past week snapshots
   };
 }
@@ -223,8 +236,9 @@ function defaults(){
 /* ---------------- state + weekly rollover ---------------- */
 var state = load() || defaults();
 // backfill any missing keys if loading an older shape
-["done","counts","history","kids","core","bonus"].forEach(function(k){ if(!state[k]) state[k]=defaults()[k]; });
+["done","counts","paid","lifetime","history","kids","core","bonus"].forEach(function(k){ if(!state[k]) state[k]=defaults()[k]; });
 if(typeof state.investPercent!=="number") state.investPercent=50;
+if(!state.since) state.since="2026-09-01";
 // migrate earlier saves on this iPad to the latest wording
 var realNames={k1:"Jackson",k2:"Aubrey",k3:"Samuel"};
 state.kids.forEach(function(k){ if(realNames[k.id] && /^Kid [123]$/.test(k.name)) k.name=realNames[k.id]; });
@@ -236,24 +250,34 @@ if(!state._emoji2){
   state.kids.forEach(function(k){ if(em[k.id] && k.emoji===em[k.id][0]) k.emoji=em[k.id][1]; });
   state._emoji2=true;
 }
+// re-anchor to Monday weeks without triggering a surprise reset of the current week
+if(!state._mon){ state.weekStart=iso(weekStartOf(today())); state._mon=true; }
 save();
 
 function snapshot(){
   var per=state.kids.map(function(k){
     var e=earned(k.id), inv=Math.round(e*state.investPercent)/100;
-    return {name:k.name, earned:e, invest:inv, keep:Math.round((e-inv)*100)/100};
+    return {id:k.id, name:k.name, earned:e, invest:inv, keep:Math.round((e-inv)*100)/100, paid:!!(state.paid&&state.paid[k.id])};
   });
-  return {ended:state.weekStart, on:iso(today()), per:per,
+  return {ended:state.weekStart, on:iso(today()), pct:state.investPercent, per:per,
     deposit:per.reduce(function(s,p){return s+p.invest;},0)};
 }
-(function rollover(){
-  var cur=iso(weekStartOf(today()));
-  if(state.weekStart!==cur){
-    // only archive if there was any activity
-    var any=state.kids.some(function(k){ return earned(k.id)>0; });
-    if(any){ state.history.unshift(snapshot()); state.history=state.history.slice(0,12); }
-    state.done={}; state.counts={}; state.weekStart=cur; save();
+function closeWeek(){
+  if(state.kids.some(function(k){ return earned(k.id)>0; })){
+    var snap=snapshot();
+    state.history.unshift(snap); state.history=state.history.slice(0,26);
+    snap.per.forEach(function(p){
+      var L=state.lifetime[p.id]=state.lifetime[p.id]||{earned:0,invest:0,keep:0};
+      L.earned=Math.round((L.earned+p.earned)*100)/100;
+      L.invest=Math.round((L.invest+p.invest)*100)/100;
+      L.keep=Math.round((L.keep+p.keep)*100)/100;
+    });
   }
+  state.done={}; state.counts={}; state.paid={};
+  state.weekStart=iso(weekStartOf(today())); save();
+}
+(function rollover(){
+  if(state.weekStart!==iso(weekStartOf(today()))) closeWeek();
 })();
 
 /* ---------------- calculations ---------------- */
@@ -450,20 +474,39 @@ function pBonus(){
 function pMoney(){
   var cards=state.kids.map(function(k){
     var e=earned(k.id), inv=Math.round(e*state.investPercent)/100, keep=Math.round((e-inv)*100)/100;
+    var paid=!!state.paid[k.id];
     return '<div class="mcard"><div class="mname">'+k.emoji+' '+esc(k.name)+'</div>'
       +'<div class="mline"><span>Earned</span><span class="v">'+money(e)+'</span></div>'
       +'<div class="mline"><span>Invest ('+state.investPercent+'%)</span><span class="v">'+money(inv)+'</span></div>'
-      +'<div class="mline"><span>Keep</span><span class="v">'+money(keep)+'</span></div></div>';
+      +'<div class="mline total"><span>Give them</span><span class="v">'+money(keep)+'</span></div>'
+      +'<button class="btn paybtn '+(paid?'':'ghost')+'" data-action="paid" data-id="'+k.id+'">'+(paid?'✓ Paid this week':'Mark paid')+'</button>'
+      +'</div>';
   }).join("");
   var deposit=state.kids.reduce(function(s,k){return s+Math.round(earned(k.id)*state.investPercent)/100;},0);
-  var hist=state.history.length? '<div class="panel history"><h3>Payday history</h3><p class="hint">Snapshots saved automatically when a new week starts.</p>'
-      +state.history.map(function(h){return '<div class="hrow"><span>Week of '+h.ended+'</span><span>paid '+money(h.per.reduce(function(s,p){return s+p.earned;},0))+' · deposited '+money(h.deposit)+'</span></div>';}).join("")+'</div>' : '';
-  return '<div class="panel"><h3>This week\u2019s money</h3><p class="hint">What each kid has earned so far, split into invest and keep.</p>'
+
+  var life='<div class="panel"><h3>Lifetime totals</h3><p class="hint">Tracking since '+monthYear(state.since)+'. Everything earned and invested so far, including this week \u2014 the invested column is the number that grows in their brokerage.</p>'
+    +state.kids.map(function(k){
+      var L=state.lifetime[k.id]||{earned:0,invest:0,keep:0};
+      var e=earned(k.id), inv=Math.round(e*state.investPercent)/100;
+      var te=Math.round((L.earned+e)*100)/100, ti=Math.round((L.invest+inv)*100)/100;
+      return '<div class="mline"><span>'+k.emoji+' '+esc(k.name)+'</span><span class="v">earned '+money(te)+' · invested '+money(ti)+'</span></div>';
+    }).join("")+'</div>';
+
+  var hist=state.history.length? '<div class="panel history"><h3>Past weeks</h3><p class="hint">Saved automatically every Monday. Forgot to mark a week paid before it rolled over? Tap the button on any kid to reconcile it now.</p>'
+      +state.history.map(function(h,hi){
+        return '<div class="hitem"><div class="hweek">Week of '+h.ended+'<span class="hdep">deposit '+money(h.deposit)+'</span></div>'
+          +h.per.map(function(p,pi){ return '<div class="hrow"><span>'+esc(p.name)+'</span>'
+            +'<span class="hright">give '+money(p.keep)+' · invest '+money(p.invest)
+            +' <button class="histpay '+(p.paid?'on':'')+'" data-action="histpaid" data-hi="'+hi+'" data-pi="'+pi+'">'+(p.paid?'✓ paid':'mark paid')+'</button></span></div>'; }).join("")
+          +'</div>';
+      }).join("")+'</div>' : '';
+
+  return '<div class="panel"><h3>This week\u2019s money</h3><p class="hint">\u201cGive them\u201d is the cash to hand each kid; the rest goes to the brokerage. Tap Mark paid once you\u2019ve paid, so nothing slips.</p>'
     +'<div class="row" style="border:none;padding-top:4px"><div class="field"><label>Invest into brokerage</label>'
     +'<div style="display:flex;align-items:center;gap:8px"><input class="in pct" type="number" min="0" max="100" step="1" data-edit="pct" value="'+state.investPercent+'"><span style="font-weight:800;color:var(--muted)">% of earnings</span></div></div></div>'
     +'<div class="money-grid">'+cards+'</div>'
     +'<div class="deposit"><span>Total to deposit this week</span><span class="amt">'+money(deposit)+'</span></div></div>'
-    +hist;
+    +life+hist;
 }
 function pSettings(){
   return '<div class="panel"><h3>Settings</h3>'
@@ -545,10 +588,12 @@ app.addEventListener("click",function(ev){
   if(a==="del-bonus"){ var bid2=el.getAttribute("data-id"); state.bonus=state.bonus.filter(function(b){return b.id!==bid2;}); save(); return render(); }
 
   /* ----- settings ----- */
+  if(a==="paid"){ var pid=el.getAttribute("data-id"); state.paid[pid]=!state.paid[pid]; save(); render(); return; }
+  if(a==="histpaid"){ var hi=+el.getAttribute("data-hi"), pi=+el.getAttribute("data-pi"); var wk=state.history[hi]; if(wk&&wk.per[pi]){ wk.per[pi].paid=!wk.per[pi].paid; save(); render(); } return; }
   if(a==="sound"){ state.sound=!state.sound; save(); return render(); }
   if(a==="setpin"){ view.pinNext="set"; view.pinBuf=""; view.screen="pin"; return render(); }
   if(a==="clearpin"){ state.pin=""; save(); return render(); }
-  if(a==="resetweek"){ if(confirm("Start a fresh week? This clears all checkmarks and bonus counts (chores and kids stay).")){ var s=snapshot(); if(state.kids.some(function(k){return earned(k.id)>0;})){ state.history.unshift(s); state.history=state.history.slice(0,12);} state.done={}; state.counts={}; state.weekStart=iso(weekStartOf(today())); save(); toast("Fresh week started"); render(); } return; }
+  if(a==="resetweek"){ if(confirm("Start a fresh week? This saves the week to Past weeks, then clears all checkmarks and bonus counts (chores and kids stay).")){ closeWeek(); toast("Fresh week started"); render(); } return; }
   if(a==="export"){ doExport(); return; }
   if(a==="import"){ doImport(); return; }
 });
