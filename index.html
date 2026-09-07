@@ -167,7 +167,7 @@
 
 /* ---------------- storage ---------------- */
 var KEY="choreQuest.v3";
-var VERSION="v6 · fixed weekly rollover";
+var VERSION="v7 · QA-hardened";
 function save(){ try{ localStorage.setItem(KEY, JSON.stringify(state)); }catch(e){} }
 function load(){ try{ var r=localStorage.getItem(KEY); return r?JSON.parse(r):null; }catch(e){ return null; } }
 
@@ -289,6 +289,8 @@ function closeWeek(newStart){
   save();
 }
 (function rolloverAndRecover(){
+  var cur=iso(weekStartOf(today()));
+  var minD=weekStartOf(today()); minD.setDate(minD.getDate()-56); var minStart=iso(weekStartOf(minD)); // don't reach back more than ~8 weeks
   // recovery: if any completions are older than the stored week, back up so they get logged, not lost
   var earliest=null;
   Object.keys(state.done).forEach(function(kid){
@@ -296,14 +298,14 @@ function closeWeek(newStart){
       Object.keys(state.done[kid][ch]).forEach(function(d){ if(!earliest||d<earliest) earliest=d; });
     });
   });
-  if(earliest){ var eStart=iso(weekStartOf(new Date(earliest+"T12:00:00"))); if(eStart<state.weekStart) state.weekStart=eStart; }
-  var cur=iso(weekStartOf(today()));
+  if(earliest){ var eStart=iso(weekStartOf(new Date(earliest+"T12:00:00"))); if(eStart<state.weekStart) state.weekStart=(eStart<minStart?minStart:eStart); }
   if(state.weekStart>cur) state.weekStart=cur; // self-heal a stray future value
   var guard=0;
   while(state.weekStart<cur && guard++<60){
     var nd=new Date(state.weekStart+"T12:00:00"); nd.setDate(nd.getDate()+7);
     closeWeek(iso(weekStartOf(nd)));
   }
+  if(state.weekStart!==cur){ state.weekStart=cur; save(); } // guarantee we land on the current week
 })();
 
 /* ---------------- calculations ---------------- */
@@ -602,17 +604,17 @@ app.addEventListener("click",function(ev){
 
   /* ----- kids crud ----- */
   if(a==="add-kid"){ var pal=["--k1","--k2","--k3"]; state.kids.push({id:uid(),name:"New kid",emoji:"⭐️",colorVar:pal[state.kids.length%3]}); save(); return render(); }
-  if(a==="del-kid"){ var id=el.getAttribute("data-id"); state.kids=state.kids.filter(function(k){return k.id!==id;}); delete state.done[id]; delete state.counts[id]; save(); return render(); }
+  if(a==="del-kid"){ var id=el.getAttribute("data-id"); state.kids=state.kids.filter(function(k){return k.id!==id;}); delete state.done[id]; delete state.counts[id]; delete state.paid[id]; save(); return render(); }
 
   /* ----- core crud ----- */
   if(a==="add-core"){ state.core.push({id:uid(),name:"New chore",emoji:"✅",value:0.25,days:[0,1,2,3,4,5,6],who:"all"}); save(); return render(); }
-  if(a==="del-core"){ var cid2=el.getAttribute("data-id"); state.core=state.core.filter(function(c){return c.id!==cid2;}); save(); return render(); }
+  if(a==="del-core"){ var cid2=el.getAttribute("data-id"); state.core=state.core.filter(function(c){return c.id!==cid2;}); Object.keys(state.done).forEach(function(kid){ if(state.done[kid]) delete state.done[kid][cid2]; }); save(); return render(); }
   if(a==="day"){ var cc=state.core.find(function(c){return c.id===el.getAttribute("data-id");}); var dy=+el.getAttribute("data-day");
     var i=cc.days.indexOf(dy); if(i>=0) cc.days.splice(i,1); else cc.days.push(dy); save(); return render(); }
 
   /* ----- bonus crud ----- */
   if(a==="add-bonus"){ state.bonus.push({id:uid(),name:"New bonus job",emoji:"⭐️",value:1}); save(); return render(); }
-  if(a==="del-bonus"){ var bid2=el.getAttribute("data-id"); state.bonus=state.bonus.filter(function(b){return b.id!==bid2;}); save(); return render(); }
+  if(a==="del-bonus"){ var bid2=el.getAttribute("data-id"); state.bonus=state.bonus.filter(function(b){return b.id!==bid2;}); Object.keys(state.counts).forEach(function(kid){ if(state.counts[kid]) delete state.counts[kid][bid2]; }); save(); return render(); }
 
   /* ----- settings ----- */
   if(a==="paid"){ var pid=el.getAttribute("data-id"); state.paid[pid]=!state.paid[pid]; save(); render(); return; }
@@ -664,7 +666,12 @@ function doExport(){
 function doImport(){
   var inp=document.createElement("input"); inp.type="file"; inp.accept="application/json,.json";
   inp.onchange=function(){ var f=inp.files[0]; if(!f) return; var r=new FileReader();
-    r.onload=function(){ try{ var data=JSON.parse(r.result); if(data&&data.kids&&data.core){ state=data; save(); toast("Backup loaded"); view.screen="parent"; render(); } else toast("That file didn\u2019t look right"); }catch(e){ toast("Could not read file"); } };
+    r.onload=function(){ try{ var data=JSON.parse(r.result); if(data&&data.kids&&data.core){
+      data.done=data.done||{}; data.counts=data.counts||{}; data.paid=data.paid||{}; data.lifetime=data.lifetime||{}; data.history=Array.isArray(data.history)?data.history:[];
+      if(typeof data.investPercent!=="number") data.investPercent=50; data.since=data.since||"2026-09-01";
+      data.weekStart=data.weekStart||iso(weekStartOf(today()));
+      state=data; save(); toast("Backup loaded"); view.screen="parent"; view.ptab="money"; render();
+    } else toast("That file didn\u2019t look right"); }catch(e){ toast("Could not read file"); } };
     r.readAsText(f); };
   inp.click();
 }
