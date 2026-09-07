@@ -43,6 +43,7 @@
   .coin-badge{font-weight:800; font-size:28px; padding:12px 26px; border-radius:18px; line-height:1;}
   .grown{margin:34px auto 0; display:block; background:var(--card); color:var(--muted);
     font-weight:800; font-size:16px; padding:14px 22px; border-radius:16px; box-shadow:var(--shadow);}
+  .ver{text-align:center; color:var(--muted); opacity:.55; font-weight:700; font-size:12px; margin-top:16px;}
 
   /* ---------- KID DAY ---------- */
   .bar{display:flex; align-items:center; gap:12px; margin:4px 0 18px;}
@@ -166,6 +167,7 @@
 
 /* ---------------- storage ---------------- */
 var KEY="choreQuest.v3";
+var VERSION="v6 · fixed weekly rollover";
 function save(){ try{ localStorage.setItem(KEY, JSON.stringify(state)); }catch(e){} }
 function load(){ try{ var r=localStorage.getItem(KEY); return r?JSON.parse(r):null; }catch(e){ return null; } }
 
@@ -175,7 +177,7 @@ var DOWFULL=["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturd
 function iso(d){ return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0"); }
 function today(){ return new Date(); }
 function weekStartOf(d){ var x=new Date(d); x.setHours(0,0,0,0); var off=(x.getDay()+6)%7; x.setDate(x.getDate()-off); return x; } // Monday
-function weekDates(){ var s=weekStartOf(today()); var a=[]; for(var i=0;i<7;i++){ var d=new Date(s); d.setDate(s.getDate()+i); a.push({iso:iso(d),dow:d.getDay()}); } return a; }
+function weekDatesFor(startISO){ var s=startISO?new Date(startISO+"T12:00:00"):weekStartOf(today()); var a=[]; for(var i=0;i<7;i++){ var d=new Date(s); d.setDate(s.getDate()+i); a.push({iso:iso(d),dow:d.getDay()}); } return a; }
 function money(n){ return "$"+(Math.round(n*100)/100).toFixed(2); }
 function monthYear(s){ var M=["January","February","March","April","May","June","July","August","September","October","November","December"]; var d=new Date(s+"T12:00:00"); return M[d.getMonth()]+" "+d.getFullYear(); }
 function uid(){ return Math.random().toString(36).slice(2,9); }
@@ -254,17 +256,20 @@ if(!state._emoji2){
 if(!state._mon){ state.weekStart=iso(weekStartOf(today())); state._mon=true; }
 save();
 
-function snapshot(){
+function snapshot(startISO){
+  var st=startISO||state.weekStart;
   var per=state.kids.map(function(k){
-    var e=earned(k.id), inv=Math.round(e*state.investPercent)/100;
+    var e=earned(k.id,st), inv=Math.round(e*state.investPercent)/100;
     return {id:k.id, name:k.name, earned:e, invest:inv, keep:Math.round((e-inv)*100)/100, paid:!!(state.paid&&state.paid[k.id])};
   });
-  return {ended:state.weekStart, on:iso(today()), pct:state.investPercent, per:per,
+  return {ended:st, on:iso(today()), pct:state.investPercent, per:per,
     deposit:per.reduce(function(s,p){return s+p.invest;},0)};
 }
-function closeWeek(){
-  if(state.kids.some(function(k){ return earned(k.id)>0; })){
-    var snap=snapshot();
+function closeWeek(newStart){
+  var oldStart=state.weekStart, inWk={};
+  weekDatesFor(oldStart).forEach(function(d){ inWk[d.iso]=1; });
+  if(state.kids.some(function(k){ return earned(k.id,oldStart)>0; })){
+    var snap=snapshot(oldStart);
     state.history.unshift(snap); state.history=state.history.slice(0,26);
     snap.per.forEach(function(p){
       var L=state.lifetime[p.id]=state.lifetime[p.id]||{earned:0,invest:0,keep:0};
@@ -273,11 +278,32 @@ function closeWeek(){
       L.keep=Math.round((L.keep+p.keep)*100)/100;
     });
   }
-  state.done={}; state.counts={}; state.paid={};
-  state.weekStart=iso(weekStartOf(today())); save();
+  // clear only the completions that belong to the week being closed
+  Object.keys(state.done).forEach(function(kid){
+    Object.keys(state.done[kid]).forEach(function(ch){
+      Object.keys(state.done[kid][ch]).forEach(function(d){ if(inWk[d]) delete state.done[kid][ch][d]; });
+    });
+  });
+  state.counts={}; state.paid={};
+  state.weekStart = newStart || iso(weekStartOf(today()));
+  save();
 }
-(function rollover(){
-  if(state.weekStart!==iso(weekStartOf(today()))) closeWeek();
+(function rolloverAndRecover(){
+  // recovery: if any completions are older than the stored week, back up so they get logged, not lost
+  var earliest=null;
+  Object.keys(state.done).forEach(function(kid){
+    Object.keys(state.done[kid]).forEach(function(ch){
+      Object.keys(state.done[kid][ch]).forEach(function(d){ if(!earliest||d<earliest) earliest=d; });
+    });
+  });
+  if(earliest){ var eStart=iso(weekStartOf(new Date(earliest+"T12:00:00"))); if(eStart<state.weekStart) state.weekStart=eStart; }
+  var cur=iso(weekStartOf(today()));
+  if(state.weekStart>cur) state.weekStart=cur; // self-heal a stray future value
+  var guard=0;
+  while(state.weekStart<cur && guard++<60){
+    var nd=new Date(state.weekStart+"T12:00:00"); nd.setDate(nd.getDate()+7);
+    closeWeek(iso(weekStartOf(nd)));
+  }
 })();
 
 /* ---------------- calculations ---------------- */
@@ -299,9 +325,9 @@ function setDone(kidId,choreId,d,v){
 function bonusCount(kidId,bId){ return (state.counts[kidId]&&state.counts[kidId][bId])||0; }
 function setBonus(kidId,bId,n){ state.counts[kidId]=state.counts[kidId]||{}; state.counts[kidId][bId]=Math.max(0,n); save(); }
 
-function coreEarned(kidId){
+function coreEarned(kidId,startISO){
   var kid=state.kids.find(function(k){return k.id===kidId;});
-  var wk=weekDates(), sum=0;
+  var wk=weekDatesFor(startISO||state.weekStart), sum=0;
   choresForKid(kid,null).forEach(function(c){
     wk.forEach(function(d){ if(c.days.indexOf(d.dow)>=0 && isDone(kidId,c.id,d.iso)) sum+=c.value; });
   });
@@ -311,7 +337,7 @@ function bonusEarned(kidId){
   var sum=0; state.bonus.forEach(function(b){ sum+=b.value*bonusCount(kidId,b.id); });
   return Math.round(sum*100)/100;
 }
-function earned(kidId){ return Math.round((coreEarned(kidId)+bonusEarned(kidId))*100)/100; }
+function earned(kidId,startISO){ return Math.round((coreEarned(kidId,startISO)+bonusEarned(kidId))*100)/100; }
 
 /* ---------------- sound ---------------- */
 var AC=null;
@@ -356,7 +382,8 @@ function renderHome(){
     '<div class="home-head"><div class="brand">Chore Quest <span class="spark">★</span></div></div>'
     +'<div class="home-sub">'+DOWFULL[today().getDay()]+' — tap your name to see today\u2019s jobs.</div>'
     +'<div class="kid-grid">'+cards+'</div>'
-    +'<button class="grown" data-action="grown">Grown-ups</button>';
+    +'<button class="grown" data-action="grown">Grown-ups</button>'
+    +'<div class="ver">'+VERSION+'</div>';
 }
 
 function renderKid(){
